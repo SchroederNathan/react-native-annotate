@@ -24,7 +24,52 @@ type InspectorData = {
   hierarchy?: InspectorHierarchyEntry[];
   source?: InspectorSource;
   selectedIndex?: number;
+  componentStack?: string;
 };
+
+type ParsedStackFrame = {
+  name: string;
+  source: InspectorSource;
+};
+
+// Parse the React 19 / RN componentStack string. Lines look like one of:
+//   "    at MyComponent (App.tsx:42:5)"          (modern V8/JSC)
+//   "    at MyComponent (.../App.tsx:42:5)"
+//   "    in MyComponent (at App.tsx:42)"         (older RN format)
+// Returns frames in stack order (deepest first).
+function parseComponentStack(stack: string): ParsedStackFrame[] {
+  const frames: ParsedStackFrame[] = [];
+  const lines = stack.split('\n');
+  const atRe = /\s*at\s+(\S+)\s+\(([^)]+):(\d+):(\d+)\)/;
+  const inRe = /\s*in\s+(\S+)\s+\(at\s+([^:]+):(\d+)(?::(\d+))?\)/;
+
+  for (const line of lines) {
+    let m = atRe.exec(line);
+    if (m) {
+      frames.push({
+        name: m[1]!,
+        source: {
+          fileName: m[2],
+          lineNumber: Number(m[3]),
+          columnNumber: Number(m[4]),
+        },
+      });
+      continue;
+    }
+    m = inRe.exec(line);
+    if (m) {
+      frames.push({
+        name: m[1]!,
+        source: {
+          fileName: m[2],
+          lineNumber: Number(m[3]),
+          columnNumber: m[4] ? Number(m[4]) : undefined,
+        },
+      });
+    }
+  }
+  return frames;
+}
 
 type GetInspectorDataFn = (
   inspectedView: unknown,
@@ -134,18 +179,27 @@ export async function findComponentAtPoint(
         ? data.selectedIndex
         : hierarchy.length - 1;
 
+    const stackFrames = data.componentStack
+      ? parseComponentStack(data.componentStack)
+      : [];
+
+    const findSourceForName = (name: string): InspectorSource | undefined => {
+      const frame = stackFrames.find((f) => f.name === name);
+      return frame?.source;
+    };
+
     // Walk from the tapped entry upward, preferring a user-named component
-    // that carries JSX __source metadata. This skips host primitives
-    // (View/Text/Pressable/etc.) so we land on the actual component the
-    // developer wrote — e.g. <ProfileCard /> not the inner <View />.
+    // (skipping View/Text/Pressable/etc.) so we land on the actual component
+    // the developer wrote — e.g. <ProfileCard /> not the inner <View />.
     let chosen: InspectorHierarchyEntry | null = null;
     let chosenSource: InspectorSource | undefined;
     for (let i = selectedIdx; i >= 0; i--) {
       const entry = hierarchy[i];
       if (!entry) continue;
-      const src = getEntrySource(entry);
       const name = entry.name?.trim();
-      if (src?.fileName && name && !HOST_NAMES.has(name)) {
+      if (!name || HOST_NAMES.has(name)) continue;
+      const src = getEntrySource(entry) ?? findSourceForName(name);
+      if (src?.fileName) {
         chosen = entry;
         chosenSource = src;
         break;
@@ -153,10 +207,13 @@ export async function findComponentAtPoint(
     }
 
     if (!chosen) {
+      // No user component with source — accept any entry with source.
       for (let i = selectedIdx; i >= 0; i--) {
         const entry = hierarchy[i];
         if (!entry) continue;
-        const src = getEntrySource(entry);
+        const name = entry.name?.trim();
+        const src =
+          getEntrySource(entry) ?? (name ? findSourceForName(name) : undefined);
         if (src?.fileName) {
           chosen = entry;
           chosenSource = src;
@@ -166,8 +223,13 @@ export async function findComponentAtPoint(
     }
 
     if (!chosen) {
+      // No source anywhere — return the tapped entry with whatever name it has.
       chosen = hierarchy[selectedIdx] ?? hierarchy[hierarchy.length - 1] ?? null;
-      chosenSource = chosen ? getEntrySource(chosen) ?? data.source : data.source;
+      const name = chosen?.name?.trim();
+      chosenSource =
+        getEntrySource(chosen ?? {}) ??
+        (name ? findSourceForName(name) : undefined) ??
+        data.source;
     }
 
     const name = chosen?.name?.trim() || 'Unknown';
