@@ -86,9 +86,14 @@ function AnnotationProviderImpl({ children }: { children: ReactNode }) {
   }, [annotations]);
 
   const handleTap = useCallback(async (x: number, y: number) => {
+    // Unmount the TouchInterceptor first — otherwise the native inspector
+    // hit-test lands on the overlay (a library-internal View with no JSX
+    // __source) instead of the actual app component under the tap.
+    setAnnotationMode(false);
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     const node = rootRef.current ? findNodeHandle(rootRef.current) : null;
     const component = await findComponentAtPoint(node, x, y);
-    setAnnotationMode(false);
     setPendingTap({ x, y, component });
   }, []);
 
