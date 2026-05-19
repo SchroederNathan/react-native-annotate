@@ -32,43 +32,88 @@ type ParsedStackFrame = {
   source: InspectorSource;
 };
 
-// Parse the React 19 / RN componentStack string. Lines look like one of:
-//   "    at MyComponent (App.tsx:42:5)"          (modern V8/JSC)
-//   "    at MyComponent (.../App.tsx:42:5)"
-//   "    in MyComponent (at App.tsx:42)"         (older RN format)
-// Returns frames in stack order (deepest first).
-function parseComponentStack(stack: string): ParsedStackFrame[] {
-  const frames: ParsedStackFrame[] = [];
-  const lines = stack.split('\n');
-  const atRe = /\s*at\s+(\S+)\s+\(([^)]+):(\d+):(\d+)\)/;
-  const inRe = /\s*in\s+(\S+)\s+\(at\s+([^:]+):(\d+)(?::(\d+))?\)/;
+type RNStackFrame = {
+  methodName?: string | null;
+  file?: string | null;
+  lineNumber?: number | null;
+  column?: number | null;
+};
 
-  for (const line of lines) {
-    let m = atRe.exec(line);
-    if (m) {
-      frames.push({
-        name: m[1]!,
-        source: {
-          fileName: m[2],
-          lineNumber: Number(m[3]),
-          columnNumber: Number(m[4]),
-        },
-      });
-      continue;
-    }
-    m = inRe.exec(line);
-    if (m) {
-      frames.push({
-        name: m[1]!,
-        source: {
-          fileName: m[2],
-          lineNumber: Number(m[3]),
-          columnNumber: m[4] ? Number(m[4]) : undefined,
-        },
-      });
-    }
+type SymbolicateResult = {
+  stack?: Array<RNStackFrame>;
+};
+
+// Lazy-load RN's internal stack utilities. They live at private-ish paths
+// (Libraries/Core/Devtools/...) but are stable across RN 0.70+. Wrapped in
+// try/catch so the library still works on older RN or non-Metro setups.
+function loadStackUtils(): {
+  parseErrorStack?: (stack: string) => RNStackFrame[];
+  symbolicateStackTrace?: (
+    stack: RNStackFrame[]
+  ) => Promise<SymbolicateResult>;
+} {
+  try {
+    /* eslint-disable @typescript-eslint/no-require-imports */
+    const parsed = require('react-native/Libraries/Core/Devtools/parseErrorStack');
+    const sym = require('react-native/Libraries/Core/Devtools/symbolicateStackTrace');
+    /* eslint-enable */
+    return {
+      parseErrorStack: parsed?.default ?? parsed,
+      symbolicateStackTrace: sym?.default ?? sym,
+    };
+  } catch {
+    return {};
   }
-  return frames;
+}
+
+// Symbolicate a React-19 componentStack against Metro's source map. The
+// componentStack from the renderer is in bundle coordinates (something like
+// `at MyComponent (.../index.bundle?...:108072:21)`); Metro's /symbolicate
+// endpoint resolves each frame back to its original source path and line.
+async function symbolicateComponentStack(
+  rawStack: string
+): Promise<ParsedStackFrame[]> {
+  const { parseErrorStack, symbolicateStackTrace } = loadStackUtils();
+  if (!parseErrorStack || !symbolicateStackTrace) return [];
+
+  let parsed: RNStackFrame[];
+  try {
+    parsed = parseErrorStack(rawStack);
+  } catch {
+    return [];
+  }
+  if (!parsed.length) return [];
+
+  let result: SymbolicateResult;
+  try {
+    result = await symbolicateStackTrace(parsed);
+  } catch {
+    // Metro not reachable — fall back to bundle-relative info; better than nothing.
+    return parsed
+      .filter((f) => f.methodName && f.file)
+      .map((f) => ({
+        name: f.methodName!,
+        source: {
+          fileName: f.file ?? undefined,
+          lineNumber: f.lineNumber ?? undefined,
+          columnNumber: f.column ?? undefined,
+        },
+      }));
+  }
+
+  const out: ParsedStackFrame[] = [];
+  for (const frame of result.stack ?? []) {
+    if (!frame.methodName || !frame.file) continue;
+    out.push({
+      name: frame.methodName,
+      source: {
+        fileName: frame.file,
+        lineNumber: frame.lineNumber ?? undefined,
+        columnNumber: frame.column ?? undefined,
+      },
+    });
+  }
+  return out;
 }
 
 type GetInspectorDataFn = (
@@ -180,7 +225,7 @@ export async function findComponentAtPoint(
         : hierarchy.length - 1;
 
     const stackFrames = data.componentStack
-      ? parseComponentStack(data.componentStack)
+      ? await symbolicateComponentStack(data.componentStack)
       : [];
 
     const findSourceForName = (name: string): InspectorSource | undefined => {
