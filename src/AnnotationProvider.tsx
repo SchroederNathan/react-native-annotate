@@ -6,7 +6,7 @@ import {
   type ComponentRef,
   type ReactNode,
 } from 'react';
-import { findNodeHandle, StyleSheet, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 import { AnnotationContext } from './context';
 import { AnnotationDrawer } from './components/AnnotationDrawer';
 import { AnnotationMarker } from './components/AnnotationMarker';
@@ -92,8 +92,10 @@ function AnnotationProviderImpl({ children }: { children: ReactNode }) {
     setAnnotationMode(false);
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-    const node = rootRef.current ? findNodeHandle(rootRef.current) : null;
-    const component = await findComponentAtPoint(node, x, y);
+    // Pass the host instance (ref.current) directly — on Fabric the renderer
+    // hit-tests by host instance, not by numeric node tag, so findNodeHandle
+    // returns the wrong shape of identifier.
+    const component = await findComponentAtPoint(rootRef.current, x, y);
     setPendingTap({ x, y, component });
   }, []);
 

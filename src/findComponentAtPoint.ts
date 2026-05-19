@@ -1,5 +1,3 @@
-import { UIManager } from 'react-native';
-
 export type ComponentInfo = {
   name: string;
   fileName?: string;
@@ -28,6 +26,23 @@ type InspectorData = {
   selectedIndex?: number;
 };
 
+type GetInspectorDataFn = (
+  inspectedView: unknown,
+  locationX: number,
+  locationY: number,
+  callback: (data: InspectorData | undefined) => boolean | void
+) => void;
+
+type ReactDevToolsRenderer = {
+  rendererConfig?: {
+    getInspectorDataForViewAtPoint?: GetInspectorDataFn;
+  };
+};
+
+type ReactDevToolsHook = {
+  renderers?: Map<unknown, ReactDevToolsRenderer>;
+};
+
 const HOST_NAMES = new Set([
   'View',
   'RCTView',
@@ -47,7 +62,44 @@ const HOST_NAMES = new Set([
   'TouchableNativeFeedback',
 ]);
 
-function getEntrySource(entry: InspectorHierarchyEntry): InspectorSource | undefined {
+function resolveInspectorFn(): GetInspectorDataFn | null {
+  // Modern path: walk the React DevTools hook's renderer registry. This is
+  // what RN's own in-app Inspector uses on both Paper and Fabric in 0.79+.
+  const hook = (globalThis as { __REACT_DEVTOOLS_GLOBAL_HOOK__?: ReactDevToolsHook })
+    .__REACT_DEVTOOLS_GLOBAL_HOOK__;
+  const renderers = hook?.renderers ? Array.from(hook.renderers.values()) : [];
+
+  const renderersWithFn = renderers.filter(
+    (r) => typeof r?.rendererConfig?.getInspectorDataForViewAtPoint === 'function'
+  );
+
+  if (renderersWithFn.length === 0) return null;
+
+  return (inspectedView, x, y, callback) => {
+    let resolved = false;
+    for (const renderer of renderersWithFn) {
+      if (resolved) break;
+      renderer.rendererConfig!.getInspectorDataForViewAtPoint!(
+        inspectedView,
+        x,
+        y,
+        (viewData) => {
+          if (viewData && viewData.hierarchy && viewData.hierarchy.length > 0) {
+            resolved = true;
+            callback(viewData);
+            return true;
+          }
+          return false;
+        }
+      );
+    }
+    if (!resolved) callback(undefined);
+  };
+}
+
+function getEntrySource(
+  entry: InspectorHierarchyEntry
+): InspectorSource | undefined {
   if (entry.source && entry.source.fileName) return entry.source;
   try {
     const data = entry.getInspectorData?.();
@@ -58,35 +110,20 @@ function getEntrySource(entry: InspectorHierarchyEntry): InspectorSource | undef
   return undefined;
 }
 
-type GetInspectorDataFn = (
-  rootTag: number,
-  x: number,
-  y: number,
-  callback: (data: InspectorData | undefined) => void
-) => void;
-
-function resolveInspectorApi(): GetInspectorDataFn | null {
-  const anyUIManager = UIManager as unknown as {
-    getInspectorDataForViewAtPoint?: GetInspectorDataFn;
-  };
-  if (typeof anyUIManager.getInspectorDataForViewAtPoint === 'function') {
-    return anyUIManager.getInspectorDataForViewAtPoint.bind(anyUIManager);
-  }
-  return null;
-}
-
 export async function findComponentAtPoint(
-  rootTag: number | null | undefined,
+  inspectedView: unknown,
   x: number,
   y: number
 ): Promise<ComponentInfo | null> {
-  if (rootTag == null) return null;
-  const getInspectorData = resolveInspectorApi();
+  if (inspectedView == null) return null;
+  const getInspectorData = resolveInspectorFn();
   if (!getInspectorData) return null;
 
   try {
     const data = await new Promise<InspectorData | undefined>((resolve) => {
-      getInspectorData(rootTag, x, y, (result) => resolve(result));
+      getInspectorData(inspectedView, x, y, (result) => {
+        resolve(result);
+      });
     });
 
     if (!data || !data.hierarchy || data.hierarchy.length === 0) return null;
@@ -97,10 +134,10 @@ export async function findComponentAtPoint(
         ? data.selectedIndex
         : hierarchy.length - 1;
 
-    // Walk from the tapped (deepest) entry up toward the root, looking for
-    // the first one that is (a) user-written (has __source metadata) and
-    // (b) not a primitive host component. This finds e.g. <ProfileCard />
-    // rather than the inner <View /> the user actually touched.
+    // Walk from the tapped entry upward, preferring a user-named component
+    // that carries JSX __source metadata. This skips host primitives
+    // (View/Text/Pressable/etc.) so we land on the actual component the
+    // developer wrote — e.g. <ProfileCard /> not the inner <View />.
     let chosen: InspectorHierarchyEntry | null = null;
     let chosenSource: InspectorSource | undefined;
     for (let i = selectedIdx; i >= 0; i--) {
@@ -115,7 +152,6 @@ export async function findComponentAtPoint(
       }
     }
 
-    // Fallback: any entry with source info, even if host-named.
     if (!chosen) {
       for (let i = selectedIdx; i >= 0; i--) {
         const entry = hierarchy[i];
@@ -129,7 +165,6 @@ export async function findComponentAtPoint(
       }
     }
 
-    // Final fallback: the originally selected entry, even with no source.
     if (!chosen) {
       chosen = hierarchy[selectedIdx] ?? hierarchy[hierarchy.length - 1] ?? null;
       chosenSource = chosen ? getEntrySource(chosen) ?? data.source : data.source;
