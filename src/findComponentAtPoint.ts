@@ -33,87 +33,101 @@ type ParsedStackFrame = {
 };
 
 type RNStackFrame = {
-  methodName?: string | null;
-  file?: string | null;
-  lineNumber?: number | null;
-  column?: number | null;
+  methodName: string;
+  file: string;
+  lineNumber: number;
+  column: number;
 };
 
 type SymbolicateResult = {
-  stack?: Array<RNStackFrame>;
+  stack?: Array<{
+    methodName?: string | null;
+    file?: string | null;
+    lineNumber?: number | null;
+    column?: number | null;
+  }>;
 };
 
-// Lazy-load RN's internal stack utilities. They live at private-ish paths
-// (Libraries/Core/Devtools/...) but are stable across RN 0.70+. Wrapped in
-// try/catch so the library still works on older RN or non-Metro setups.
-function loadStackUtils(): {
-  parseErrorStack?: (stack: string) => RNStackFrame[];
-  symbolicateStackTrace?: (
-    stack: RNStackFrame[]
-  ) => Promise<SymbolicateResult>;
-} {
-  try {
-    /* eslint-disable @typescript-eslint/no-require-imports */
-    const parsed = require('react-native/Libraries/Core/Devtools/parseErrorStack');
-    const sym = require('react-native/Libraries/Core/Devtools/symbolicateStackTrace');
-    /* eslint-enable */
-    return {
-      parseErrorStack: parsed?.default ?? parsed,
-      symbolicateStackTrace: sym?.default ?? sym,
-    };
-  } catch {
-    return {};
+// Parse the componentStack string React 19 builds via stack introspection.
+// On Hermes/V8 the frames look like:
+//   "    at MyComponent (http://localhost:8081/index.bundle?...:108072:21)"
+const FRAME_RE = /at\s+(\S+)\s+\(([^)]+):(\d+):(\d+)\)/;
+
+function parseComponentStack(stack: string): RNStackFrame[] {
+  const frames: RNStackFrame[] = [];
+  for (const line of stack.split('\n')) {
+    const m = FRAME_RE.exec(line);
+    if (!m) continue;
+    frames.push({
+      methodName: m[1]!,
+      file: m[2]!,
+      lineNumber: Number(m[3]),
+      column: Number(m[4]),
+    });
   }
+  return frames;
 }
 
-// Symbolicate a React-19 componentStack against Metro's source map. The
-// componentStack from the renderer is in bundle coordinates (something like
+// Pull the Metro dev server origin out of a bundle URL like
+// "http://localhost:8081/index.bundle?platform=ios&...". Returns something
+// like "http://localhost:8081/". Returns null for non-URL frames (e.g. the
+// JSC/Hermes internal frames that have no http scheme).
+function extractDevServerOrigin(file: string): string | null {
+  const m = /^(https?:\/\/[^/]+)\//.exec(file);
+  return m ? m[1] + '/' : null;
+}
+
+// Symbolicate a React 19 componentStack against Metro's source map. The
+// componentStack from the renderer is in bundle coordinates (e.g.
 // `at MyComponent (.../index.bundle?...:108072:21)`); Metro's /symbolicate
 // endpoint resolves each frame back to its original source path and line.
 async function symbolicateComponentStack(
   rawStack: string
 ): Promise<ParsedStackFrame[]> {
-  const { parseErrorStack, symbolicateStackTrace } = loadStackUtils();
-  if (!parseErrorStack || !symbolicateStackTrace) return [];
-
-  let parsed: RNStackFrame[];
-  try {
-    parsed = parseErrorStack(rawStack);
-  } catch {
-    return [];
-  }
+  const parsed = parseComponentStack(rawStack);
   if (!parsed.length) return [];
 
-  let result: SymbolicateResult;
-  try {
-    result = await symbolicateStackTrace(parsed);
-  } catch {
-    // Metro not reachable — fall back to bundle-relative info; better than nothing.
-    return parsed
-      .filter((f) => f.methodName && f.file)
-      .map((f) => ({
-        name: f.methodName!,
-        source: {
-          fileName: f.file ?? undefined,
-          lineNumber: f.lineNumber ?? undefined,
-          columnNumber: f.column ?? undefined,
-        },
-      }));
-  }
+  const devServer = parsed
+    .map((f) => extractDevServerOrigin(f.file))
+    .find((u): u is string => u != null);
 
-  const out: ParsedStackFrame[] = [];
-  for (const frame of result.stack ?? []) {
-    if (!frame.methodName || !frame.file) continue;
-    out.push({
-      name: frame.methodName,
-      source: {
-        fileName: frame.file,
-        lineNumber: frame.lineNumber ?? undefined,
-        columnNumber: frame.column ?? undefined,
-      },
+  const unsymbolicated: ParsedStackFrame[] = parsed.map((f) => ({
+    name: f.methodName,
+    source: {
+      fileName: f.file,
+      lineNumber: f.lineNumber,
+      columnNumber: f.column,
+    },
+  }));
+
+  const fetchFn = (globalThis as { fetch?: typeof fetch }).fetch;
+  if (!devServer || typeof fetchFn !== 'function') return unsymbolicated;
+
+  try {
+    const response = await fetchFn(devServer + 'symbolicate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stack: parsed }),
     });
+    if (!response.ok) return unsymbolicated;
+    const result = (await response.json()) as SymbolicateResult;
+
+    const out: ParsedStackFrame[] = [];
+    for (const frame of result.stack ?? []) {
+      if (!frame.methodName || !frame.file) continue;
+      out.push({
+        name: frame.methodName,
+        source: {
+          fileName: frame.file,
+          lineNumber: frame.lineNumber ?? undefined,
+          columnNumber: frame.column ?? undefined,
+        },
+      });
+    }
+    return out.length ? out : unsymbolicated;
+  } catch {
+    return unsymbolicated;
   }
-  return out;
 }
 
 type GetInspectorDataFn = (
@@ -155,12 +169,14 @@ const HOST_NAMES = new Set([
 function resolveInspectorFn(): GetInspectorDataFn | null {
   // Modern path: walk the React DevTools hook's renderer registry. This is
   // what RN's own in-app Inspector uses on both Paper and Fabric in 0.79+.
-  const hook = (globalThis as { __REACT_DEVTOOLS_GLOBAL_HOOK__?: ReactDevToolsHook })
-    .__REACT_DEVTOOLS_GLOBAL_HOOK__;
+  const hook = (
+    globalThis as { __REACT_DEVTOOLS_GLOBAL_HOOK__?: ReactDevToolsHook }
+  ).__REACT_DEVTOOLS_GLOBAL_HOOK__;
   const renderers = hook?.renderers ? Array.from(hook.renderers.values()) : [];
 
   const renderersWithFn = renderers.filter(
-    (r) => typeof r?.rendererConfig?.getInspectorDataForViewAtPoint === 'function'
+    (r) =>
+      typeof r?.rendererConfig?.getInspectorDataForViewAtPoint === 'function'
   );
 
   if (renderersWithFn.length === 0) return null;
@@ -269,7 +285,8 @@ export async function findComponentAtPoint(
 
     if (!chosen) {
       // No source anywhere — return the tapped entry with whatever name it has.
-      chosen = hierarchy[selectedIdx] ?? hierarchy[hierarchy.length - 1] ?? null;
+      chosen =
+        hierarchy[selectedIdx] ?? hierarchy[hierarchy.length - 1] ?? null;
       const name = chosen?.name?.trim();
       chosenSource =
         getEntrySource(chosen ?? {}) ??

@@ -90,8 +90,12 @@ function AnnotationProviderImpl({ children }: { children: ReactNode }) {
     // hit-test lands on the overlay (a library-internal View with no JSX
     // __source) instead of the actual app component under the tap.
     setAnnotationMode(false);
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => resolve())
+    );
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => resolve())
+    );
     // Pass the host instance (ref.current) directly — on Fabric the renderer
     // hit-tests by host instance, not by numeric node tag, so findNodeHandle
     // returns the wrong shape of identifier.
