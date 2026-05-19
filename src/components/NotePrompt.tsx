@@ -146,10 +146,10 @@ const styles = StyleSheet.create({
     backgroundColor: 'transparent',
   },
   save: {
-    backgroundColor: '#6366F1',
+    backgroundColor: '#000000',
   },
   cancelText: {
-    color: '#475569',
+    color: '#0F172A',
     fontWeight: '600',
   },
   saveText: {

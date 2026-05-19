@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import {
   Animated,
   PanResponder,
@@ -12,18 +12,21 @@ type Props = {
   annotationMode: boolean;
   pendingCount: number;
   onToggleMode: () => void;
-  onOpenDrawer: () => void;
+  onCopy: () => Promise<void>;
 };
+
+type CopyState = 'idle' | 'copied' | 'error';
 
 export function FloatingToggle({
   annotationMode,
   pendingCount,
   onToggleMode,
-  onOpenDrawer,
+  onCopy,
 }: Props) {
   const position = useRef(new Animated.ValueXY({ x: 0, y: 0 })).current;
   const offset = useRef({ x: 0, y: 0 });
   const dragged = useRef(false);
+  const [copyState, setCopyState] = useState<CopyState>('idle');
 
   const panResponder = useRef(
     PanResponder.create({
@@ -49,6 +52,21 @@ export function FloatingToggle({
     })
   ).current;
 
+  const handleCopy = async () => {
+    if (dragged.current || pendingCount === 0) return;
+    try {
+      await onCopy();
+      setCopyState('copied');
+    } catch {
+      setCopyState('error');
+    }
+    setTimeout(() => setCopyState('idle'), 1200);
+  };
+
+  const copyDisabled = pendingCount === 0;
+  const copyGlyph =
+    copyState === 'copied' ? '✓' : copyState === 'error' ? '✕' : '⧉';
+
   return (
     <Animated.View
       style={[
@@ -64,23 +82,25 @@ export function FloatingToggle({
           if (!dragged.current) onToggleMode();
         }}
         style={({ pressed }) => [
-          styles.fab,
-          annotationMode && styles.fabActive,
+          styles.cell,
+          annotationMode && styles.cellActive,
           pressed && styles.pressed,
         ]}
       >
-        <Text style={[styles.fabIcon, annotationMode && styles.fabIconActive]}>
-          {annotationMode ? '×' : '✎'}
-        </Text>
+        <Text style={styles.icon}>{annotationMode ? '✦' : '✧'}</Text>
       </Pressable>
+      <View style={styles.divider} />
       <Pressable
-        onPress={() => {
-          if (!dragged.current) onOpenDrawer();
-        }}
-        style={({ pressed }) => [styles.list, pressed && styles.pressed]}
+        onPress={handleCopy}
+        disabled={copyDisabled}
+        style={({ pressed }) => [
+          styles.cell,
+          pressed && !copyDisabled && styles.pressed,
+          copyDisabled && styles.disabled,
+        ]}
       >
-        <Text style={styles.listIcon}>≡</Text>
-        {pendingCount > 0 && (
+        <Text style={styles.icon}>{copyGlyph}</Text>
+        {pendingCount > 0 && copyState === 'idle' && (
           <View style={styles.badge}>
             <Text style={styles.badgeText}>{pendingCount}</Text>
           </View>
@@ -90,77 +110,71 @@ export function FloatingToggle({
   );
 }
 
+const PILL_HEIGHT = 56;
+const CELL_SIZE = 56;
+
 const styles = StyleSheet.create({
   container: {
     position: 'absolute',
     right: 20,
     bottom: 60,
+    flexDirection: 'row',
     alignItems: 'center',
+    height: PILL_HEIGHT,
+    borderRadius: PILL_HEIGHT / 2,
+    backgroundColor: '#000000',
+    overflow: 'hidden',
     zIndex: 9999,
-    gap: 10,
-  },
-  fab: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: '#6366F1',
-    alignItems: 'center',
-    justifyContent: 'center',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
     elevation: 8,
   },
-  fabActive: {
-    backgroundColor: '#0F172A',
-  },
-  fabIcon: {
-    color: '#FFFFFF',
-    fontSize: 26,
-    fontWeight: '600',
-    lineHeight: 28,
-  },
-  fabIconActive: {
-    fontSize: 32,
-  },
-  list: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: '#FFFFFF',
+  cell: {
+    width: CELL_SIZE,
+    height: CELL_SIZE,
     alignItems: 'center',
     justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.18,
-    shadowRadius: 6,
-    elevation: 6,
   },
-  listIcon: {
-    color: '#0F172A',
-    fontSize: 22,
-    fontWeight: '700',
-    lineHeight: 24,
+  cellActive: {
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    borderRadius: PILL_HEIGHT / 2,
+  },
+  divider: {
+    width: StyleSheet.hairlineWidth,
+    height: 28,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  icon: {
+    color: '#FFFFFF',
+    fontSize: 24,
+    lineHeight: 28,
+    fontWeight: '500',
+    textAlign: 'center',
   },
   badge: {
     position: 'absolute',
-    top: -4,
-    right: -4,
-    minWidth: 18,
-    height: 18,
+    top: 8,
+    right: 8,
+    minWidth: 16,
+    height: 16,
     paddingHorizontal: 4,
-    borderRadius: 9,
-    backgroundColor: '#DC2626',
+    borderRadius: 8,
+    backgroundColor: '#FFFFFF',
     alignItems: 'center',
     justifyContent: 'center',
   },
   badgeText: {
-    color: '#FFFFFF',
-    fontSize: 11,
+    color: '#000000',
+    fontSize: 10,
     fontWeight: '700',
   },
   pressed: {
-    opacity: 0.8,
+    opacity: 0.6,
+  },
+  disabled: {
+    opacity: 0.35,
   },
 });

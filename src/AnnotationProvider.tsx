@@ -8,7 +8,6 @@ import {
 } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { AnnotationContext } from './context';
-import { AnnotationDrawer } from './components/AnnotationDrawer';
 import { AnnotationMarker } from './components/AnnotationMarker';
 import { FloatingToggle } from './components/FloatingToggle';
 import { NotePrompt } from './components/NotePrompt';
@@ -47,7 +46,6 @@ function AnnotationProviderImpl({ children }: { children: ReactNode }) {
   const rootRef = useRef<ComponentRef<typeof View>>(null);
   const [annotationMode, setAnnotationMode] = useState(false);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
-  const [drawerVisible, setDrawerVisible] = useState(false);
   const [pendingTap, setPendingTap] = useState<PendingTap | null>(null);
 
   const addAnnotation = useCallback(
@@ -156,21 +154,13 @@ function AnnotationProviderImpl({ children }: { children: ReactNode }) {
           annotationMode={annotationMode}
           pendingCount={annotations.length}
           onToggleMode={() => setAnnotationMode((m) => !m)}
-          onOpenDrawer={() => setDrawerVisible(true)}
+          onCopy={copyAsMarkdown}
         />
         <NotePrompt
           visible={pendingTap !== null}
           component={pendingTap?.component ?? null}
           onSave={handleSaveNote}
           onCancel={() => setPendingTap(null)}
-        />
-        <AnnotationDrawer
-          visible={drawerVisible}
-          annotations={annotations}
-          onClose={() => setDrawerVisible(false)}
-          onCopy={copyAsMarkdown}
-          onRemove={removeAnnotation}
-          onClear={clearAnnotations}
         />
       </View>
     </AnnotationContext.Provider>

@@ -31,7 +31,7 @@ const styles = StyleSheet.create({
     width: MARKER_SIZE,
     height: MARKER_SIZE,
     borderRadius: MARKER_SIZE / 2,
-    backgroundColor: '#6366F1',
+    backgroundColor: '#000000',
     borderWidth: 2,
     borderColor: '#FFFFFF',
     alignItems: 'center',
